@@ -8,9 +8,11 @@ from .errors import KkhayApiError
 from .types import (
     CreateInvoiceRequest,
     GetInvoiceResponse,
+    InvoiceTypeEnum,
     KkhayInvoice,
     KkhayPaymentRecord,
     ListInvoicesResponse,
+    PaymentNetwork,
 )
 
 
@@ -22,13 +24,15 @@ class KkhayClient:
     >>> from kkhay import KkhayClient
     >>> client = KkhayClient(api_key="kkhay_live_...")
     >>> res = client.create_invoice(
-    ...     price_amount=49.99,
+    ...     amount=49.99,
     ...     pay_network="bsc",
     ...     pay_token="USDT",
     ...     title="Pro Subscription",
     ... )
     >>> print("Pay URL:", res["invoice"].hosted_url)
     """
+
+    VERSION: str = "1.0.4"
 
     def __init__(
         self,
@@ -59,7 +63,7 @@ class KkhayClient:
         headers = {
             "Accept": "application/json",
             "x-api-key": self.api_key,
-            "User-Agent": "kkhay-python/1.0.0",
+            "User-Agent": f"kkhay-python/{self.VERSION}",
         }
 
         body_bytes: Optional[bytes] = None
@@ -71,7 +75,6 @@ class KkhayClient:
 
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                status = response.status
                 raw = response.read().decode("utf-8")
                 if not raw:
                     return {}
@@ -105,14 +108,19 @@ class KkhayClient:
                 raise KkhayApiError(408, f"Request timed out after {self.timeout}s") from e
             raise KkhayApiError(500, f"Network connection error: {e.reason}") from e
         except Exception as e:
+            if isinstance(e, KkhayApiError):
+                raise
             raise KkhayApiError(500, f"Unexpected error: {e}") from e
 
     def create_invoice(
         self,
-        price_amount: float,
-        pay_network: str,
+        pay_network: PaymentNetwork,
         pay_token: str,
-        price_currency: str = "USD",
+        amount: Optional[float] = None,
+        price_amount: Optional[float] = None,
+        currency: Optional[str] = None,
+        price_currency: Optional[str] = "USD",
+        type: str = InvoiceTypeEnum.PAYMENT,
         order_id: Optional[str] = None,
         title: Optional[str] = None,
         customer_name: Optional[str] = None,
@@ -125,20 +133,33 @@ class KkhayClient:
         """
         Creates a new sovereign crypto payment invoice.
 
+        :param pay_network: Target blockchain network (e.g. 'bsc', 'polygon', 'solana', 'bitcoin')
+        :param pay_token: Payment currency or token symbol (e.g. 'USDT', 'USDC', 'BTC', 'ETH', 'SOL')
+        :param amount: Invoice total in fiat/crypto units (convenience alias: price_amount)
+        :param price_amount: Deprecated alias for amount
+        :param currency: Base currency code (default: 'USD')
+        :param price_currency: Deprecated alias for currency
+        :param type: Invoice type ('PAYMENT', 'DONATION', 'SUBSCRIPTION')
         :return: Dict with keys 'ok' (bool) and 'invoice' (KkhayInvoice)
         """
-        if price_amount <= 0:
-            raise ValueError("create_invoice: 'price_amount' must be a positive number.")
-        if not pay_network:
-            raise ValueError("create_invoice: 'pay_network' is required (e.g. 'bsc', 'polygon').")
-        if not pay_token:
-            raise ValueError("create_invoice: 'pay_token' is required (e.g. 'USDT', 'USDC').")
+        raw_amt = amount if amount is not None else price_amount
+        if raw_amt is None or float(raw_amt) <= 0:
+            raise ValueError("create_invoice: 'amount' (or 'price_amount') must be a positive number.")
+
+        if not pay_network or not str(pay_network).strip():
+            raise ValueError("create_invoice: 'pay_network' is required (e.g. 'bsc', 'polygon', 'solana', 'bitcoin').")
+
+        if not pay_token or not str(pay_token).strip():
+            raise ValueError("create_invoice: 'pay_token' is required (e.g. 'USDT', 'USDC', 'BTC', 'ETH', 'SOL').")
 
         payload = CreateInvoiceRequest(
-            price_amount=price_amount,
+            amount=float(raw_amt),
+            price_amount=float(raw_amt),
             pay_network=pay_network,
             pay_token=pay_token,
-            price_currency=price_currency,
+            currency=currency or price_currency or "USD",
+            price_currency=currency or price_currency or "USD",
+            type=type or InvoiceTypeEnum.PAYMENT,
             order_id=order_id,
             title=title,
             customer_name=customer_name,
@@ -149,7 +170,7 @@ class KkhayClient:
             metadata=metadata,
         ).to_dict()
 
-        res = self._request("/v1/merchant/invoices", method="POST", data=payload)
+        res = self._request("/v1/gateway/invoices", method="POST", data=payload)
         return {
             "ok": bool(res.get("ok", True)),
             "invoice": KkhayInvoice.from_dict(res.get("invoice", {})),
@@ -162,7 +183,7 @@ class KkhayClient:
         if not invoice_id or not str(invoice_id).strip():
             raise ValueError("get_invoice: 'invoice_id' is required.")
 
-        res = self._request(f"/v1/merchant/invoices/{urllib.parse.quote(str(invoice_id).strip())}")
+        res = self._request(f"/v1/gateway/invoices/{urllib.parse.quote(str(invoice_id).strip())}")
         invoice_raw = res.get("invoice", {})
         payments_raw = res.get("payments", [])
 
@@ -177,10 +198,11 @@ class KkhayClient:
         page: int = 1,
         limit: int = 20,
         status: Optional[str] = None,
+        type: Optional[str] = None,
         search: Optional[str] = None,
     ) -> ListInvoicesResponse:
         """
-        List and paginate merchant invoices.
+        List and paginate gateway invoices with optional filtering.
         """
         params: Dict[str, str] = {
             "page": str(page),
@@ -188,11 +210,13 @@ class KkhayClient:
         }
         if status:
             params["status"] = status
+        if type:
+            params["type"] = type
         if search:
             params["search"] = search
 
         query_str = urllib.parse.urlencode(params)
-        res = self._request(f"/v1/merchant/invoices?{query_str}")
+        res = self._request(f"/v1/gateway/invoices?{query_str}")
 
         items_raw = res.get("items", [])
         return ListInvoicesResponse(
@@ -209,4 +233,3 @@ class KkhayClient:
         Check connectivity and health of the K Khay API gateway.
         """
         return self._request("/health")
-

@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-import secrets
 from typing import Any, Dict, Optional, Union
 
 from .errors import SignatureVerificationError
@@ -18,10 +17,12 @@ def verify_webhook_signature(
 
     :param payload: The raw request body string, bytes, or parsed dict
     :param signature: The signature header value ('x-kkhay-signature')
-    :param ipn_secret: Your merchant IPN Secret Key
+    :param ipn_secret: Your gateway IPN Secret Key
     :return: True if valid, False otherwise
     """
-    if not signature or not ipn_secret:
+    if not signature or not isinstance(signature, str) or not signature.strip():
+        return False
+    if not ipn_secret or not isinstance(ipn_secret, str) or not ipn_secret.strip():
         return False
 
     if isinstance(payload, bytes):
@@ -32,9 +33,9 @@ def verify_webhook_signature(
         raw_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
     try:
-        secret_bytes = ipn_secret.encode("utf-8")
+        secret_bytes = ipn_secret.strip().encode("utf-8")
         computed_hex = hmac.new(secret_bytes, raw_bytes, hashlib.sha256).hexdigest()
-        return secrets.compare_digest(computed_hex, signature.strip())
+        return hmac.compare_digest(computed_hex, signature.strip())
     except Exception:
         return False
 
@@ -48,10 +49,12 @@ def parse_webhook_event(
     Validates and safely parses an incoming K Khay webhook event.
     Raises SignatureVerificationError if signature does not match.
 
-    :param raw_body: The raw request body
+    :param raw_body: The raw request body (str or bytes)
     :param signature: The 'x-kkhay-signature' header value
-    :param ipn_secret: Your merchant IPN Secret Key
+    :param ipn_secret: Your gateway IPN Secret Key
     :return: Typed KkhayWebhookEvent
+    :raises SignatureVerificationError: If the webhook signature is invalid or tampered
+    :raises ValueError: If the payload is not valid JSON
     """
     if not verify_webhook_signature(raw_body, signature, ipn_secret):
         raise SignatureVerificationError("Invalid K Khay webhook signature: Request rejected.")
@@ -62,8 +65,10 @@ def parse_webhook_event(
         else:
             text = raw_body
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("Webhook JSON payload must be an object.")
         return KkhayWebhookEvent.from_dict(data)
+    except SignatureVerificationError:
+        raise
     except Exception as e:
-        if isinstance(e, SignatureVerificationError):
-            raise
         raise ValueError(f"Failed to parse webhook JSON payload: {e}") from e
